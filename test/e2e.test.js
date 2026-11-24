@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { io as connect } from 'socket.io-client';
 import { createApp } from '../src/server.js';
+import { MemoryHostStore } from '../src/auth/hostStore.js';
 
 const emit = (sock, event, payload = {}) =>
   new Promise((resolve) => sock.emit(event, payload, resolve));
@@ -9,9 +10,16 @@ const once = (sock, event) => new Promise((resolve) => sock.once(event, resolve)
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function boot() {
-  const ctx = createApp();
+  const hostStore = new MemoryHostStore([{ username: 'Vizek', password: 'pass-1234' }]);
+  const ctx = createApp({ hostStore });
   await new Promise((r) => ctx.server.listen(0, r));
   const url = `http://localhost:${ctx.server.address().port}`;
+  const login = await fetch(`${url}/api/host/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'vizek', password: 'pass-1234' }),
+  });
+  const { token } = await login.json();
   const clients = [];
   const client = async () => {
     const s = connect(url, { transports: ['websocket'], forceNew: true });
@@ -24,7 +32,7 @@ async function boot() {
     ctx.manager.shutdown();
     await new Promise((r) => ctx.io.close(r));
   };
-  return { ...ctx, url, client, close };
+  return { ...ctx, url, token, client, close };
 }
 
 const questions = [
@@ -37,7 +45,7 @@ test('لعبة كاملة عبر Socket.IO: مضيف ولاعبان ودردشة
   try {
     const host = await s.client();
     const created = await emit(host, 'room:create', {
-      name: 'غرفة الاختبار', isPublic: true, teamSize: 1, totalRounds: 2, questions,
+      auth: s.token, name: 'غرفة الاختبار', isPublic: true, teamSize: 1, totalRounds: 2, questions,
     });
     assert.equal(created.ok, true);
     const { code } = created;
@@ -132,7 +140,7 @@ test('العودة بعد الانقطاع، الطرد مع الحظر، وقف
   try {
     const host = await s.client();
     const { code, hostToken } = await emit(host, 'room:create', {
-      name: 'غرفة', isPublic: false, teamSize: 2, totalRounds: 2, questions,
+      auth: s.token, name: 'غرفة', isPublic: false, teamSize: 2, totalRounds: 2, questions,
     });
     const p1 = await s.client();
     const j1 = await emit(p1, 'room:join', { code, name: 'أحمد', avatar: 'bear', team: 'red' });
@@ -178,6 +186,83 @@ test('العودة بعد الانقطاع، الطرد مع الحظر، وقف
     assert.equal((await emit(host2, 'host:close')).ok, true);
     assert.equal(s.manager.get(code), null);
     void closed;
+  } finally {
+    await s.close();
+  }
+});
+
+test('دخول المضيف: كلمة مرور خاطئة، رمز مطلوب لإنشاء غرفة، وحد الغرف', async () => {
+  const s = await boot();
+  try {
+    const post = (body) =>
+      fetch(`${s.url}/api/host/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    assert.equal((await post({ username: 'vizek', password: 'wrong' })).status, 401);
+    assert.equal((await post({ username: 'nobody', password: 'x' })).status, 401);
+    assert.equal((await post({})).status, 400);
+
+    const me = await fetch(`${s.url}/api/host/me`, { headers: { authorization: `Bearer ${s.token}` } });
+    assert.equal((await me.json()).host.username, 'Vizek');
+    assert.equal((await fetch(`${s.url}/api/host/me`)).status, 401);
+
+    const sock = await s.client();
+    const settings = { name: 'غرفة', teamSize: 1, totalRounds: 1, questions };
+    assert.equal((await emit(sock, 'room:create', settings)).error, 'unauthorized');
+    assert.equal((await emit(sock, 'room:create', { ...settings, auth: 'a.b.c' })).error, 'unauthorized');
+
+    const ok = await emit(sock, 'room:create', { ...settings, auth: s.token });
+    assert.equal(ok.ok, true);
+    // مضيف واحد لا يملك أكثر من 3 غرف في وقت واحد
+    for (let i = 0; i < 2; i += 1) {
+      const c = await s.client();
+      assert.equal((await emit(c, 'room:create', { ...settings, auth: s.token })).ok, true);
+    }
+    const extra = await s.client();
+    assert.equal((await emit(extra, 'room:create', { ...settings, auth: s.token })).error, 'too_many_rooms');
+  } finally {
+    await s.close();
+  }
+});
+
+test('تحديد محاولات الدخول الفاشلة', async () => {
+  const s = await boot();
+  try {
+    let last = 0;
+    for (let i = 0; i < 9; i += 1) {
+      const r = await fetch(`${s.url}/api/host/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: 'vizek', password: `bad${i}` }),
+      });
+      last = r.status;
+    }
+    assert.equal(last, 429);
+  } finally {
+    await s.close();
+  }
+});
+
+test('بعد إغلاق الغرفة يستطيع نفس الاتصال إنشاء غرفة أو دخول غرفة أخرى', async () => {
+  const s = await boot();
+  try {
+    const settings = { auth: s.token, name: 'الأولى', teamSize: 1, totalRounds: 1, questions };
+    const host = await s.client();
+    const first = await emit(host, 'room:create', settings);
+    const p = await s.client();
+    await emit(p, 'room:join', { code: first.code, name: 'لاعب', avatar: 'owl', team: 'red' });
+
+    assert.equal((await emit(host, 'host:close')).ok, true);
+    await wait(60);
+
+    // المضيف ينشئ غرفة ثانية بنفس الاتصال
+    const second = await emit(host, 'room:create', { ...settings, name: 'الثانية' });
+    assert.equal(second.ok, true);
+    // واللاعب (كانت غرفته أُغلقت) ينضم للثانية دون خطأ already_in_room
+    const j = await emit(p, 'room:join', { code: second.code, name: 'لاعب', avatar: 'owl', team: 'red' });
+    assert.equal(j.ok, true);
   } finally {
     await s.close();
   }
