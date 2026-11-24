@@ -1,8 +1,10 @@
 import crypto from 'node:crypto';
 import { GameError, fail } from '../game/errors.js';
+import { verifyToken } from '../auth/tokens.js';
 
 const IP_SALT = process.env.IP_SALT || 'dialed-in';
 const MAX_EVENTS_PER_SEC = 120;
+const MAX_ROOMS_PER_HOST = 3;
 
 // بصمة مشفّرة للعنوان (لا نخزّن العنوان نفسه) تُستخدم للحظر داخل الغرفة
 function ipHashOf(socket) {
@@ -67,8 +69,14 @@ function wireRoom(io, room) {
     io.to(socketId).emit('host:promoted', { hostToken, questions: room.hostQuestions() });
   });
 
-  room.on('closed', (reason) => {
+  room.on('closed', async (reason) => {
     io.to(code).emit('room:closed', { reason });
+    // نصفّر حالة كل مقبس كان فيها كي يستطيع دخول غرفة أخرى أو إنشاء واحدة
+    for (const s of await io.in(code).fetchSockets()) {
+      s.data.code = null;
+      s.data.playerId = null;
+      s.data.isHost = false;
+    }
     io.in(code).socketsLeave(code);
   });
 }
@@ -93,6 +101,14 @@ export function registerSockets(io, manager) {
       const room = roomOf();
       if (!socket.data.playerId) fail('not_player');
       return room;
+    };
+    // إن كانت الغرفة المسجّلة على هذا المقبس لم تعد موجودة نصفّر حالته
+    const healStale = () => {
+      if (socket.data.code && !manager.get(socket.data.code)) {
+        socket.data.code = null;
+        socket.data.playerId = null;
+        socket.data.isHost = false;
+      }
     };
     const enter = (room, { playerId = null, isHost = false } = {}) => {
       socket.join(room.code);
@@ -142,7 +158,11 @@ export function registerSockets(io, manager) {
 
     // ── المضيف: إنشاء الغرفة والعودة إليها ──
     on('room:create', (p) => {
+      const auth = verifyToken(p.auth);
+      if (!auth || (auth.role !== 'host' && auth.role !== 'admin')) fail('unauthorized');
+      healStale();
       if (socket.data.code) fail('already_in_room');
+      if (manager.countByOwner(auth.sub) >= MAX_ROOMS_PER_HOST) fail('too_many_rooms');
       const room = manager.create({
         name: p.name,
         isPublic: p.isPublic,
@@ -150,6 +170,7 @@ export function registerSockets(io, manager) {
         totalRounds: p.totalRounds,
         questions: p.questions,
       });
+      room.ownerId = auth.sub;
       room.attachHost(socket.id);
       enter(room, { isHost: true });
       return {
@@ -170,6 +191,7 @@ export function registerSockets(io, manager) {
 
     // ── اللاعب ──
     on('room:join', (p) => {
+      healStale();
       if (socket.data.code) fail('already_in_room');
       const room = manager.require(p.code);
       const player = room.addPlayer({
