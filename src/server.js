@@ -6,11 +6,13 @@ import { Server } from 'socket.io';
 import { config, isAllowedOrigin } from './config.js';
 import healthRouter from './routes/health.js';
 import roomsRouter from './routes/rooms.js';
+import hostRouter from './routes/host.js';
+import { hostStoreFromEnv } from './auth/hostStore.js';
 import { RoomManager } from './game/roomManager.js';
 import { registerSockets } from './sockets/index.js';
 
 // ينشئ التطبيق كاملًا دون تشغيله (ليسهل اختباره)
-export function createApp() {
+export function createApp({ hostStore = hostStoreFromEnv() } = {}) {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 1); // Render يعمل خلف وسيط
@@ -29,6 +31,7 @@ export function createApp() {
   app.get('/', (_req, res) => res.json({ name: 'Dialed In API' }));
   app.use(healthRouter);
   app.use('/api', roomsRouter(manager));
+  app.use('/api', hostRouter(hostStore));
 
   app.use((_req, res) => res.status(404).json({ error: 'not_found' }));
   // eslint-disable-next-line no-unused-vars
