@@ -56,6 +56,13 @@ export class RoomManager extends EventEmitter {
     this.emit('removed', room);
   }
 
+  // عدد الغرف الحية التي يملكها مضيف (لتحديد الحد الأقصى)
+  countByOwner(ownerId) {
+    let n = 0;
+    for (const room of this.rooms.values()) if (room.ownerId === ownerId) n += 1;
+    return n;
+  }
+
   // قائمة الغرف العامة للردهة (بيانات عامة فقط)
   listPublic() {
     const out = [];
