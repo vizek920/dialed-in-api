@@ -70,6 +70,7 @@ export class RoomManager extends EventEmitter {
         status,
         players: room.players.size,
         maxPlayers: room.teamSize * 2,
+        avatars: room.playerList().slice(0, 5).map((pl) => pl.avatar),
         totalRounds: room.totalRounds,
         hostConnected: room.hostConnected,
       });
