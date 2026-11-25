@@ -7,12 +7,15 @@ import { config, isAllowedOrigin } from './config.js';
 import healthRouter from './routes/health.js';
 import roomsRouter from './routes/rooms.js';
 import hostRouter from './routes/host.js';
+import bankRouter from './routes/bank.js';
+import adminRouter from './routes/admin.js';
+import { MemoryBankStore } from './store/memoryBank.js';
 import { hostStoreFromEnv } from './auth/hostStore.js';
 import { RoomManager } from './game/roomManager.js';
 import { registerSockets } from './sockets/index.js';
 
 // ينشئ التطبيق كاملًا دون تشغيله (ليسهل اختباره)
-export function createApp({ hostStore = hostStoreFromEnv() } = {}) {
+export function createApp({ hostStore = hostStoreFromEnv(), bankStore = new MemoryBankStore() } = {}) {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 1); // Render يعمل خلف وسيط
@@ -32,6 +35,8 @@ export function createApp({ hostStore = hostStoreFromEnv() } = {}) {
   app.use(healthRouter);
   app.use('/api', roomsRouter(manager));
   app.use('/api', hostRouter(hostStore));
+  app.use('/api', bankRouter(bankStore, hostStore));
+  app.use('/api', adminRouter({ manager, bankStore, hostStore }));
 
   app.use((_req, res) => res.status(404).json({ error: 'not_found' }));
   // eslint-disable-next-line no-unused-vars
@@ -51,7 +56,7 @@ export function createApp({ hostStore = hostStoreFromEnv() } = {}) {
     pingTimeout: 20000,
     maxHttpBufferSize: 1e5, // 100KB تكفي لأي رسالة لعبة
   });
-  registerSockets(io, manager);
+  registerSockets(io, manager, hostStore);
 
   return { app, server, io, manager };
 }
