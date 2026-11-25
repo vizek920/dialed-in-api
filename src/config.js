@@ -18,4 +18,3 @@ export function isAllowedOrigin(origin) {
   if (!origin) return true;
   return config.clientOrigins.includes(origin.replace(/\/+$/, ''));
 }
- 
