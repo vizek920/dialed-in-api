@@ -81,7 +81,7 @@ function wireRoom(io, room) {
   });
 }
 
-export function registerSockets(io, manager) {
+export function registerSockets(io, manager, hostStore) {
   manager.on('created', (room) => wireRoom(io, room));
 
   io.on('connection', (socket) => {
@@ -157,12 +157,15 @@ export function registerSockets(io, manager) {
     on('lobby:public', () => ({ rooms: manager.listPublic() }));
 
     // ── المضيف: إنشاء الغرفة والعودة إليها ──
-    on('room:create', (p) => {
+    on('room:create', async (p) => {
       const auth = verifyToken(p.auth);
-      if (!auth || (auth.role !== 'host' && auth.role !== 'admin')) fail('unauthorized');
+      if (!auth) fail('unauthorized');
+      // الحساب يُقرأ من المتجر: الإيقاف وتغيير الدور يسريان فورًا
+      const account = await hostStore.findById(auth.sub);
+      if (!account || !account.active) fail('unauthorized');
       healStale();
       if (socket.data.code) fail('already_in_room');
-      if (manager.countByOwner(auth.sub) >= MAX_ROOMS_PER_HOST) fail('too_many_rooms');
+      if (manager.countByOwner(account.id) >= MAX_ROOMS_PER_HOST) fail('too_many_rooms');
       const room = manager.create({
         name: p.name,
         isPublic: p.isPublic,
@@ -170,7 +173,8 @@ export function registerSockets(io, manager) {
         totalRounds: p.totalRounds,
         questions: p.questions,
       });
-      room.ownerId = auth.sub;
+      room.ownerId = account.id;
+      room.ownerName = account.displayName;
       room.attachHost(socket.id);
       enter(room, { isHost: true });
       return {
