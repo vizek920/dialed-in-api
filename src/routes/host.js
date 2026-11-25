@@ -1,19 +1,15 @@
 import { Router } from 'express';
-import { signToken, verifyToken } from '../auth/tokens.js';
+import { signToken } from '../auth/tokens.js';
 import { hashPassword, verifyPassword } from '../auth/password.js';
+import { requireRole } from '../auth/middleware.js';
 
-const DUMMY_HASH = hashPassword('dummy-password');
+export { readBearer } from '../auth/middleware.js';
 
 const MAX_FAILS = 8;
 const WINDOW_MS = 15 * 60_000;
+const DUMMY_HASH = hashPassword('dummy-password');
 
-// يقرأ رمز المضيف من ترويسة Authorization
-export function readBearer(req) {
-  const h = req.headers.authorization || '';
-  return h.startsWith('Bearer ') ? verifyToken(h.slice(7)) : null;
-}
-
-// دخول المضيف: اسم مستخدم وكلمة مرور → رمز. محاولات الفشل محدودة لكل عنوان واسم.
+// دخول المضيف/المشرف/المدير: اسم مستخدم وكلمة مرور → رمز. محاولات الفشل محدودة لكل عنوان واسم.
 export default function hostRouter(hostStore) {
   const router = Router();
   const fails = new Map(); // key → { count, first }
@@ -51,17 +47,19 @@ export default function hostRouter(hostStore) {
         return res.status(401).json({ error: 'bad_credentials' });
       }
       fails.delete(key);
-      const token = signToken({ sub: host.id, name: host.username, role: host.role });
-      res.json({ token, host: { id: host.id, username: host.username, role: host.role } });
+      await hostStore.touchLogin?.(host.id);
+      const token = signToken({ sub: host.id, name: host.displayName, role: host.role });
+      res.json({
+        token,
+        host: { id: host.id, username: host.username, displayName: host.displayName, role: host.role },
+      });
     } catch (err) {
       next(err);
     }
   });
 
-  router.get('/host/me', (req, res) => {
-    const t = readBearer(req);
-    if (!t) return res.status(401).json({ error: 'unauthorized' });
-    res.json({ host: { id: t.sub, username: t.name, role: t.role } });
+  router.get('/host/me', requireRole(hostStore, 'host', 'moderator', 'admin'), (req, res) => {
+    res.json({ host: req.user });
   });
 
   return router;
